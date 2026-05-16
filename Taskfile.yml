@@ -1,0 +1,33 @@
+version: '3'
+
+tasks:
+  setup-gotip:
+    desc: Clone + build Go master HEAD into ~/.local/share/gotip. Required because go.mod declares go 1.27 (unreleased). Idempotent — delete $GOROOT to force rebuild.
+    cmds:
+      - |
+        set -e
+        if [ -x "$GOROOT/bin/go" ]; then
+          echo "gotip already built at $GOROOT"
+          exit 0
+        fi
+        BOOTSTRAP="$(mise where go)"
+        if [ ! -d "$GOROOT/.git" ]; then
+          git clone https://go.googlesource.com/go "$GOROOT"
+        fi
+        cd "$GOROOT/src"
+        GOROOT_BOOTSTRAP="$BOOTSTRAP" ./make.bash
+
+  build:
+    desc: Compile-check the module
+    cmds:
+      - go build -o /dev/null ./...
+
+  vet:
+    desc: Run go vet
+    cmds:
+      - go vet ./...
+
+  test:
+    desc: Run tests
+    cmds:
+      - go test ./...

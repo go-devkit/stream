@@ -1,0 +1,7 @@
+[tools]
+go = "1.26.1"
+task = "3.50.0"
+
+[env]
+GOROOT = "{{env.HOME}}/.local/share/gotip"
+_.path = ["{{env.HOME}}/.local/share/gotip/bin"]
