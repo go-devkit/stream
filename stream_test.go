@@ -748,6 +748,287 @@ func TestCollectToMapValueFnErrorPropagates(t *testing.T) {
 	}
 }
 
+func TestTakeWhile(t *testing.T) {
+	out, err := Of(1, 2, 3, 4, 5, 1, 2).
+		TakeWhile(func(elem int) (bool, error) { return elem < 4, nil }).
+		ToSlice()
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !slices.Equal(out, []int{1, 2, 3}) {
+		t.Fatalf("got %v, want [1 2 3]", out)
+	}
+}
+
+func TestTakeWhileLazy(t *testing.T) {
+	calls := 0
+	out, err := Range(0, 1_000_000).
+		Map(func(elem int) (int, error) {
+			calls++
+			return elem, nil
+		}).
+		TakeWhile(func(elem int) (bool, error) { return elem < 5, nil }).
+		ToSlice()
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !slices.Equal(out, []int{0, 1, 2, 3, 4}) {
+		t.Fatalf("got %v", out)
+	}
+	if calls != 6 {
+		t.Fatalf("Map called %d times, want 6 (5 taken + 1 stopper)", calls)
+	}
+}
+
+func TestTakeWhileErrorPropagates(t *testing.T) {
+	_, err := Of(1, 2, 3).
+		TakeWhile(func(elem int) (bool, error) {
+			if elem == 2 {
+				return false, errBoom
+			}
+			return true, nil
+		}).
+		ToSlice()
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("got %v, want %v", err, errBoom)
+	}
+}
+
+func TestDropWhile(t *testing.T) {
+	out, err := Of(1, 2, 3, 4, 5, 1, 2).
+		DropWhile(func(elem int) (bool, error) { return elem < 4, nil }).
+		ToSlice()
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !slices.Equal(out, []int{4, 5, 1, 2}) {
+		t.Fatalf("got %v, want [4 5 1 2]", out)
+	}
+}
+
+func TestDropWhileAllDropped(t *testing.T) {
+	out, err := Of(1, 2, 3).
+		DropWhile(func(elem int) (bool, error) { return true, nil }).
+		ToSlice()
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if len(out) != 0 {
+		t.Fatalf("got %v, want empty", out)
+	}
+}
+
+func TestDropWhilePredicateStopsBeingCalled(t *testing.T) {
+	calls := 0
+	out, err := Of(1, 2, 3, 1, 2).
+		DropWhile(func(elem int) (bool, error) {
+			calls++
+			return elem < 3, nil
+		}).
+		ToSlice()
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !slices.Equal(out, []int{3, 1, 2}) {
+		t.Fatalf("got %v", out)
+	}
+	if calls != 3 {
+		t.Fatalf("predicate called %d times, want 3 (stops once false seen)", calls)
+	}
+}
+
+func TestDropWhileErrorPropagates(t *testing.T) {
+	_, err := Of(1, 2, 3).
+		DropWhile(func(elem int) (bool, error) {
+			if elem == 2 {
+				return false, errBoom
+			}
+			return true, nil
+		}).
+		ToSlice()
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("got %v, want %v", err, errBoom)
+	}
+}
+
+func TestConcat(t *testing.T) {
+	out, err := Concat(Of(1, 2), Of(3, 4), Of(5)).ToSlice()
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !slices.Equal(out, []int{1, 2, 3, 4, 5}) {
+		t.Fatalf("got %v", out)
+	}
+}
+
+func TestConcatEmpty(t *testing.T) {
+	out, err := Concat[int]().ToSlice()
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if len(out) != 0 {
+		t.Fatalf("got %v", out)
+	}
+}
+
+func TestConcatMixedEmpty(t *testing.T) {
+	out, err := Concat(
+		FromSlice([]int{}),
+		Of(1, 2),
+		FromSlice([]int{}),
+		Of(3),
+	).ToSlice()
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !slices.Equal(out, []int{1, 2, 3}) {
+		t.Fatalf("got %v", out)
+	}
+}
+
+func TestConcatLazy(t *testing.T) {
+	calls := 0
+	out, err := Concat(
+		Range(0, 1_000_000).Map(func(elem int) (int, error) {
+			calls++
+			return elem, nil
+		}),
+		Of(-1),
+	).Limit(3).ToSlice()
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !slices.Equal(out, []int{0, 1, 2}) {
+		t.Fatalf("got %v", out)
+	}
+	if calls != 3 {
+		t.Fatalf("Map called %d times, want 3 (Concat laziness broken)", calls)
+	}
+}
+
+func TestConcatErrorPropagates(t *testing.T) {
+	failing := Of(1, 2, 3).Map(func(elem int) (int, error) {
+		if elem == 2 {
+			return 0, errBoom
+		}
+		return elem, nil
+	})
+	_, err := Concat(failing, Of(4, 5)).ToSlice()
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("got %v, want %v", err, errBoom)
+	}
+}
+
+func TestZip(t *testing.T) {
+	out, err := Of(1, 2, 3).
+		Zip(Of("a", "b", "c"), func(num int, letter string) (string, error) {
+			return letter + ":" + string(rune('0'+num)), nil
+		}).
+		ToSlice()
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !slices.Equal(out, []string{"a:1", "b:2", "c:3"}) {
+		t.Fatalf("got %v", out)
+	}
+}
+
+func TestZipTruncatesToShorter(t *testing.T) {
+	out, err := Of(1, 2, 3, 4, 5).
+		Zip(Of("a", "b"), func(num int, letter string) (string, error) {
+			return letter, nil
+		}).
+		ToSlice()
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !slices.Equal(out, []string{"a", "b"}) {
+		t.Fatalf("got %v", out)
+	}
+}
+
+func TestZipEmpty(t *testing.T) {
+	out, err := FromSlice([]int{}).
+		Zip(Of("a"), func(num int, letter string) (string, error) { return letter, nil }).
+		ToSlice()
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if len(out) != 0 {
+		t.Fatalf("got %v", out)
+	}
+}
+
+func TestZipLazy(t *testing.T) {
+	leftCalls := 0
+	rightCalls := 0
+	out, err := Range(0, 1_000_000).
+		Map(func(elem int) (int, error) {
+			leftCalls++
+			return elem, nil
+		}).
+		Zip(
+			Range(0, 1_000_000).Map(func(elem int) (int, error) {
+				rightCalls++
+				return elem * 10, nil
+			}),
+			func(a, b int) (int, error) { return a + b, nil },
+		).
+		Limit(3).
+		ToSlice()
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !slices.Equal(out, []int{0, 11, 22}) {
+		t.Fatalf("got %v", out)
+	}
+	if leftCalls != 3 || rightCalls != 3 {
+		t.Fatalf("left=%d right=%d, want both 3 (Zip laziness broken)", leftCalls, rightCalls)
+	}
+}
+
+func TestZipLeftErrorPropagates(t *testing.T) {
+	failing := Of(1, 2, 3).Map(func(elem int) (int, error) {
+		if elem == 2 {
+			return 0, errBoom
+		}
+		return elem, nil
+	})
+	_, err := failing.Zip(Of("a", "b", "c"), func(num int, letter string) (string, error) {
+		return letter, nil
+	}).ToSlice()
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("got %v, want %v", err, errBoom)
+	}
+}
+
+func TestZipRightErrorPropagates(t *testing.T) {
+	failing := Of("a", "b", "c").Map(func(elem string) (string, error) {
+		if elem == "b" {
+			return "", errBoom
+		}
+		return elem, nil
+	})
+	_, err := Of(1, 2, 3).Zip(failing, func(num int, letter string) (string, error) {
+		return letter, nil
+	}).ToSlice()
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("got %v, want %v", err, errBoom)
+	}
+}
+
+func TestZipCombinerErrorPropagates(t *testing.T) {
+	_, err := Of(1, 2, 3).Zip(Of(1, 2, 3), func(a, b int) (int, error) {
+		if a == 2 {
+			return 0, errBoom
+		}
+		return a + b, nil
+	}).ToSlice()
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("got %v, want %v", err, errBoom)
+	}
+}
+
 func TestChained(t *testing.T) {
 	sum, err := Range(0, 20).
 		Filter(func(v int) (bool, error) { return v%2 == 0, nil }).

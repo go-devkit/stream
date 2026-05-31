@@ -24,29 +24,50 @@ var ErrEmpty = errors.New("stream: terminal op on empty stream")
 // CollectToMap when keyFn yields the same key for more than one element.
 var ErrDuplicateKey = errors.New("stream: duplicate key in CollectToMap")
 
-// Stream is a lazy pipeline of T. Transforms compose without iterating;
-// iteration is driven by terminal operations. Errors raised by callbacks are
-// stored in a pipeline-shared cell and surface through the terminal's error
-// return; no transform panics. Not safe for concurrent use.
+// Stream is a lazy pipeline of T. Internally backed by iter.Seq2[T, error],
+// so per-element errors flow through the iterator protocol — no shared mutable
+// state, and operators stay pure.
+//
+// Re-use: a Stream is a pipeline description, not a one-shot iterator. Every
+// terminal triggers a fresh iteration of the entire pipeline; stateful
+// operators (DistinctBy, SortedBy) reset their state per run. Calling multiple
+// terminals on the same Stream is safe and yields independent results, unlike
+// Java's single-use streams.
+//
+// When err is non-nil on a yielded pair, the value of T is undefined and
+// callers must ignore it. Not safe for concurrent use across goroutines from
+// the same terminal call.
 type Stream[T any] struct {
-	seq iter.Seq[T]
-	err *error
-}
-
-func newStream[T any](err *error, seq iter.Seq[T]) *Stream[T] {
-	return &Stream[T]{seq: seq, err: err}
+	seq iter.Seq2[T, error]
 }
 
 // --- Sources ---
 
 func FromSlice[T any](src []T) *Stream[T] {
-	var err error
-	return newStream(&err, slices.Values(src))
+	return &Stream[T]{seq: func(yield func(T, error) bool) {
+		for _, elem := range src {
+			if !yield(elem, nil) {
+				return
+			}
+		}
+	}}
 }
 
-func FromSeq[T any](seq iter.Seq[T]) *Stream[T] {
-	var err error
-	return newStream(&err, seq)
+// FromSeq wraps a non-fallible iter.Seq. Every yielded element pairs with a
+// nil error.
+func FromSeq[T any](src iter.Seq[T]) *Stream[T] {
+	return &Stream[T]{seq: func(yield func(T, error) bool) {
+		for elem := range src {
+			if !yield(elem, nil) {
+				return
+			}
+		}
+	}}
+}
+
+// FromSeq2 adopts a fallible iter.Seq2 directly.
+func FromSeq2[T any](src iter.Seq2[T, error]) *Stream[T] {
+	return &Stream[T]{seq: src}
 }
 
 func Of[T any](elems ...T) *Stream[T] {
@@ -62,151 +83,263 @@ type Entry[K comparable, V any] struct {
 // FromMap streams a map as Entry values. Iteration order is Go's randomized
 // map order; chain SortedBy if a stable order is needed.
 func FromMap[K comparable, V any](src map[K]V) *Stream[Entry[K, V]] {
-	var err error
-	return newStream(&err, func(yield func(Entry[K, V]) bool) {
+	return &Stream[Entry[K, V]]{seq: func(yield func(Entry[K, V], error) bool) {
 		for key, value := range src {
-			if !yield(Entry[K, V]{Key: key, Value: value}) {
+			if !yield(Entry[K, V]{Key: key, Value: value}, nil) {
 				return
 			}
 		}
-	})
+	}}
+}
+
+// Concat emits the elements of each input stream in order. Lazy: downstream
+// pulls drive consumption.
+func Concat[T any](streams ...*Stream[T]) *Stream[T] {
+	return &Stream[T]{seq: func(yield func(T, error) bool) {
+		for _, inner := range streams {
+			for elem, err := range inner.seq {
+				if !yield(elem, err) {
+					return
+				}
+				if err != nil {
+					return
+				}
+			}
+		}
+	}}
 }
 
 func Range(from, to int) *Stream[int] {
-	var err error
-	return newStream(&err, func(yield func(int) bool) {
+	return &Stream[int]{seq: func(yield func(int, error) bool) {
 		for idx := from; idx < to; idx++ {
-			if !yield(idx) {
+			if !yield(idx, nil) {
 				return
 			}
 		}
-	})
+	}}
 }
 
 // --- Transforms (lazy) ---
 
 func (s *Stream[T]) Map[N any](fn func(T) (N, error)) *Stream[N] {
-	return newStream(s.err, func(yield func(N) bool) {
-		if *s.err != nil {
-			return
-		}
-		for elem := range s.seq {
+	return &Stream[N]{seq: func(yield func(N, error) bool) {
+		var zero N
+		for elem, err := range s.seq {
+			if err != nil {
+				yield(zero, err)
+				return
+			}
 			mapped, err := fn(elem)
 			if err != nil {
-				*s.err = err
+				yield(zero, err)
 				return
 			}
-			if !yield(mapped) {
+			if !yield(mapped, nil) {
 				return
 			}
 		}
-	})
+	}}
 }
 
 func (s *Stream[T]) Filter(fn func(T) (bool, error)) *Stream[T] {
-	return newStream(s.err, func(yield func(T) bool) {
-		if *s.err != nil {
-			return
-		}
-		for elem := range s.seq {
+	return &Stream[T]{seq: func(yield func(T, error) bool) {
+		var zero T
+		for elem, err := range s.seq {
+			if err != nil {
+				yield(zero, err)
+				return
+			}
 			keep, err := fn(elem)
 			if err != nil {
-				*s.err = err
+				yield(zero, err)
 				return
 			}
-			if keep && !yield(elem) {
+			if keep && !yield(elem, nil) {
 				return
 			}
 		}
-	})
+	}}
 }
 
 func (s *Stream[T]) FlatMap[N any](fn func(T) (*Stream[N], error)) *Stream[N] {
-	return newStream(s.err, func(yield func(N) bool) {
-		if *s.err != nil {
-			return
-		}
-		for elem := range s.seq {
+	return &Stream[N]{seq: func(yield func(N, error) bool) {
+		var zero N
+		for elem, err := range s.seq {
+			if err != nil {
+				yield(zero, err)
+				return
+			}
 			inner, err := fn(elem)
 			if err != nil {
-				*s.err = err
+				yield(zero, err)
 				return
 			}
-			for mapped := range inner.seq {
-				if *s.err != nil {
+			for mapped, err := range inner.seq {
+				if !yield(mapped, err) {
 					return
 				}
-				if !yield(mapped) {
+				if err != nil {
 					return
 				}
-			}
-			if *inner.err != nil {
-				*s.err = *inner.err
-				return
 			}
 		}
-	})
+	}}
 }
 
 func (s *Stream[T]) Limit(count int) *Stream[T] {
-	return newStream(s.err, func(yield func(T) bool) {
-		if *s.err != nil || count <= 0 {
+	return &Stream[T]{seq: func(yield func(T, error) bool) {
+		if count <= 0 {
 			return
 		}
 		taken := 0
-		for elem := range s.seq {
-			taken++
-			if !yield(elem) {
+		for elem, err := range s.seq {
+			if !yield(elem, err) {
 				return
 			}
+			if err != nil {
+				return
+			}
+			taken++
 			if taken >= count {
 				return
 			}
 		}
-	})
+	}}
+}
+
+// TakeWhile yields elements while predicateFn returns true. The first element
+// for which predicateFn returns false is dropped and terminates the stream;
+// downstream sees no further elements.
+func (s *Stream[T]) TakeWhile(predicateFn func(T) (bool, error)) *Stream[T] {
+	return &Stream[T]{seq: func(yield func(T, error) bool) {
+		var zero T
+		for elem, err := range s.seq {
+			if err != nil {
+				yield(zero, err)
+				return
+			}
+			keep, err := predicateFn(elem)
+			if err != nil {
+				yield(zero, err)
+				return
+			}
+			if !keep {
+				return
+			}
+			if !yield(elem, nil) {
+				return
+			}
+		}
+	}}
+}
+
+// DropWhile skips elements while predicateFn returns true. Once predicateFn
+// returns false for an element, that element and all subsequent elements are
+// yielded unconditionally (predicateFn is not consulted again).
+func (s *Stream[T]) DropWhile(predicateFn func(T) (bool, error)) *Stream[T] {
+	return &Stream[T]{seq: func(yield func(T, error) bool) {
+		var zero T
+		dropping := true
+		for elem, err := range s.seq {
+			if err != nil {
+				yield(zero, err)
+				return
+			}
+			if dropping {
+				keep, err := predicateFn(elem)
+				if err != nil {
+					yield(zero, err)
+					return
+				}
+				if keep {
+					continue
+				}
+				dropping = false
+			}
+			if !yield(elem, nil) {
+				return
+			}
+		}
+	}}
 }
 
 func (s *Stream[T]) Skip(count int) *Stream[T] {
-	return newStream(s.err, func(yield func(T) bool) {
-		if *s.err != nil {
-			return
-		}
+	return &Stream[T]{seq: func(yield func(T, error) bool) {
 		skipped := 0
-		for elem := range s.seq {
+		for elem, err := range s.seq {
+			if err != nil {
+				yield(elem, err)
+				return
+			}
 			if skipped < count {
 				skipped++
 				continue
 			}
-			if !yield(elem) {
+			if !yield(elem, nil) {
 				return
 			}
 		}
-	})
+	}}
+}
+
+// Zip pairs elements of this stream with elements of other, combining each
+// pair via combinerFn. Stops as soon as either source exhausts; surplus
+// elements in the longer source are not consumed.
+func (s *Stream[T]) Zip[U, R any](other *Stream[U], combinerFn func(T, U) (R, error)) *Stream[R] {
+	return &Stream[R]{seq: func(yield func(R, error) bool) {
+		var zero R
+		nextOther, stopOther := iter.Pull2(other.seq)
+		defer stopOther()
+		for elem, err := range s.seq {
+			if err != nil {
+				yield(zero, err)
+				return
+			}
+			otherElem, otherErr, hasMore := nextOther()
+			if !hasMore {
+				return
+			}
+			if otherErr != nil {
+				yield(zero, otherErr)
+				return
+			}
+			combined, err := combinerFn(elem, otherElem)
+			if err != nil {
+				yield(zero, err)
+				return
+			}
+			if !yield(combined, nil) {
+				return
+			}
+		}
+	}}
 }
 
 // DistinctBy yields each element whose key (as returned by keyFn) has not been
 // seen before, preserving first-occurrence order.
 func (s *Stream[T]) DistinctBy[K comparable](keyFn func(T) (K, error)) *Stream[T] {
-	return newStream(s.err, func(yield func(T) bool) {
-		if *s.err != nil {
-			return
-		}
+	return &Stream[T]{seq: func(yield func(T, error) bool) {
+		var zero T
 		seen := make(map[K]struct{})
-		for elem := range s.seq {
+		for elem, err := range s.seq {
+			if err != nil {
+				yield(zero, err)
+				return
+			}
 			key, err := keyFn(elem)
 			if err != nil {
-				*s.err = err
+				yield(zero, err)
 				return
 			}
 			if _, ok := seen[key]; ok {
 				continue
 			}
 			seen[key] = struct{}{}
-			if !yield(elem) {
+			if !yield(elem, nil) {
 				return
 			}
 		}
-	})
+	}}
 }
 
 // Distinct yields each distinct element once, preserving first-occurrence
@@ -221,24 +354,23 @@ func Distinct[T comparable](s *Stream[T]) *Stream[T] {
 // yields elements in order. Sorting cannot be performed lazily — this stage
 // blocks until the full upstream is consumed; downstream remains lazy.
 func (s *Stream[T]) SortedBy(cmpFn func(a, b T) int) *Stream[T] {
-	return newStream(s.err, func(yield func(T) bool) {
-		if *s.err != nil {
-			return
-		}
+	return &Stream[T]{seq: func(yield func(T, error) bool) {
+		var zero T
 		var buffer []T
-		for elem := range s.seq {
+		for elem, err := range s.seq {
+			if err != nil {
+				yield(zero, err)
+				return
+			}
 			buffer = append(buffer, elem)
-		}
-		if *s.err != nil {
-			return
 		}
 		slices.SortFunc(buffer, cmpFn)
 		for _, elem := range buffer {
-			if !yield(elem) {
+			if !yield(elem, nil) {
 				return
 			}
 		}
-	})
+	}}
 }
 
 // Sort yields the elements of an Ordered stream in ascending order. See the
@@ -276,72 +408,74 @@ func By[T any, K cmp.Ordered](keyFn func(T) K) func(a, b T) int {
 }
 
 // Peek invokes fn for every element passing through this stage without altering
-// the stream. Useful for logging or debugging inside a pipeline.
+// the stream. fn is not invoked for error-bearing pairs. Useful for logging or
+// debugging inside a pipeline.
 func (s *Stream[T]) Peek(fn func(T)) *Stream[T] {
-	return newStream(s.err, func(yield func(T) bool) {
-		if *s.err != nil {
-			return
-		}
-		for elem := range s.seq {
-			fn(elem)
-			if !yield(elem) {
+	return &Stream[T]{seq: func(yield func(T, error) bool) {
+		for elem, err := range s.seq {
+			if err == nil {
+				fn(elem)
+			}
+			if !yield(elem, err) {
+				return
+			}
+			if err != nil {
 				return
 			}
 		}
-	})
+	}}
 }
 
 // --- Terminals ---
 
+// ToSlice collects every element into a new slice. Empty input returns a nil
+// slice (not []T{}); both have len() == 0 and range cleanly, so the
+// distinction matters only for direct nil comparisons.
 func (s *Stream[T]) ToSlice() ([]T, error) {
-	if *s.err != nil {
-		return nil, *s.err
-	}
 	var out []T
-	for elem := range s.seq {
+	for elem, err := range s.seq {
+		if err != nil {
+			return nil, err
+		}
 		out = append(out, elem)
 	}
-	return out, *s.err
+	return out, nil
 }
 
 func (s *Stream[T]) Count() (int, error) {
-	if *s.err != nil {
-		return 0, *s.err
-	}
 	count := 0
-	for range s.seq {
+	for _, err := range s.seq {
+		if err != nil {
+			return 0, err
+		}
 		count++
 	}
-	return count, *s.err
+	return count, nil
 }
 
 // First returns the first element and ok=true; ok=false if the stream is
 // empty. Pulls a single element and stops the pipeline.
 func (s *Stream[T]) First() (T, bool, error) {
 	var zero T
-	if *s.err != nil {
-		return zero, false, *s.err
-	}
-	for elem := range s.seq {
-		if *s.err != nil {
-			return zero, false, *s.err
+	for elem, err := range s.seq {
+		if err != nil {
+			return zero, false, err
 		}
 		return elem, true, nil
 	}
-	return zero, false, *s.err
+	return zero, false, nil
 }
 
 // Reduce combines elements using the first as the seed; the callback is not
 // invoked for a single-element stream. Returns ErrEmpty on empty input. Use
 // Fold if an init value is needed or the accumulator type differs from T.
 func (s *Stream[T]) Reduce(fn func(T, T) (T, error)) (T, error) {
-	var zero T
-	if *s.err != nil {
-		return zero, *s.err
-	}
-	var result T
+	var zero, result T
 	hasResult := false
-	for elem := range s.seq {
+	for elem, err := range s.seq {
+		if err != nil {
+			return zero, err
+		}
 		if !hasResult {
 			result = elem
 			hasResult = true
@@ -353,9 +487,6 @@ func (s *Stream[T]) Reduce(fn func(T, T) (T, error)) (T, error) {
 		}
 		result = next
 	}
-	if *s.err != nil {
-		return zero, *s.err
-	}
 	if !hasResult {
 		return zero, ErrEmpty
 	}
@@ -365,12 +496,12 @@ func (s *Stream[T]) Reduce(fn func(T, T) (T, error)) (T, error) {
 // Fold folds elements into an accumulator of arbitrary type A starting from
 // init. Empty input returns init and a nil error.
 func (s *Stream[T]) Fold[A any](init A, fn func(A, T) (A, error)) (A, error) {
-	if *s.err != nil {
-		var zero A
-		return zero, *s.err
-	}
 	acc := init
-	for elem := range s.seq {
+	for elem, err := range s.seq {
+		if err != nil {
+			var zero A
+			return zero, err
+		}
 		next, err := fn(acc, elem)
 		if err != nil {
 			var zero A
@@ -378,30 +509,26 @@ func (s *Stream[T]) Fold[A any](init A, fn func(A, T) (A, error)) (A, error) {
 		}
 		acc = next
 	}
-	if *s.err != nil {
-		var zero A
-		return zero, *s.err
-	}
 	return acc, nil
 }
 
 func (s *Stream[T]) ForEach(fn func(T) error) error {
-	if *s.err != nil {
-		return *s.err
-	}
-	for elem := range s.seq {
+	for elem, err := range s.seq {
+		if err != nil {
+			return err
+		}
 		if err := fn(elem); err != nil {
 			return err
 		}
 	}
-	return *s.err
+	return nil
 }
 
 func (s *Stream[T]) AnyMatch(fn func(T) (bool, error)) (bool, error) {
-	if *s.err != nil {
-		return false, *s.err
-	}
-	for elem := range s.seq {
+	for elem, err := range s.seq {
+		if err != nil {
+			return false, err
+		}
 		matched, err := fn(elem)
 		if err != nil {
 			return false, err
@@ -410,14 +537,14 @@ func (s *Stream[T]) AnyMatch(fn func(T) (bool, error)) (bool, error) {
 			return true, nil
 		}
 	}
-	return false, *s.err
+	return false, nil
 }
 
 func (s *Stream[T]) AllMatch(fn func(T) (bool, error)) (bool, error) {
-	if *s.err != nil {
-		return false, *s.err
-	}
-	for elem := range s.seq {
+	for elem, err := range s.seq {
+		if err != nil {
+			return false, err
+		}
 		matched, err := fn(elem)
 		if err != nil {
 			return false, err
@@ -425,9 +552,6 @@ func (s *Stream[T]) AllMatch(fn func(T) (bool, error)) (bool, error) {
 		if !matched {
 			return false, nil
 		}
-	}
-	if *s.err != nil {
-		return false, *s.err
 	}
 	return true, nil
 }
@@ -439,13 +563,12 @@ func (s *Stream[T]) NoneMatch(fn func(T) (bool, error)) (bool, error) {
 
 // MinBy returns the smallest element per cmpFn. Returns ErrEmpty on empty input.
 func (s *Stream[T]) MinBy(cmpFn func(a, b T) int) (T, error) {
-	var zero T
-	if *s.err != nil {
-		return zero, *s.err
-	}
-	var best T
+	var zero, best T
 	hasBest := false
-	for elem := range s.seq {
+	for elem, err := range s.seq {
+		if err != nil {
+			return zero, err
+		}
 		if !hasBest {
 			best = elem
 			hasBest = true
@@ -455,9 +578,6 @@ func (s *Stream[T]) MinBy(cmpFn func(a, b T) int) (T, error) {
 			best = elem
 		}
 	}
-	if *s.err != nil {
-		return zero, *s.err
-	}
 	if !hasBest {
 		return zero, ErrEmpty
 	}
@@ -466,13 +586,12 @@ func (s *Stream[T]) MinBy(cmpFn func(a, b T) int) (T, error) {
 
 // MaxBy returns the largest element per cmpFn. Returns ErrEmpty on empty input.
 func (s *Stream[T]) MaxBy(cmpFn func(a, b T) int) (T, error) {
-	var zero T
-	if *s.err != nil {
-		return zero, *s.err
-	}
-	var best T
+	var zero, best T
 	hasBest := false
-	for elem := range s.seq {
+	for elem, err := range s.seq {
+		if err != nil {
+			return zero, err
+		}
 		if !hasBest {
 			best = elem
 			hasBest = true
@@ -481,9 +600,6 @@ func (s *Stream[T]) MaxBy(cmpFn func(a, b T) int) (T, error) {
 		if cmpFn(elem, best) > 0 {
 			best = elem
 		}
-	}
-	if *s.err != nil {
-		return zero, *s.err
 	}
 	if !hasBest {
 		return zero, ErrEmpty
@@ -496,10 +612,11 @@ func (s *Stream[T]) MaxBy(cmpFn func(a, b T) int) (T, error) {
 // wraps silently (matches Go arithmetic semantics).
 func (s *Stream[T]) SumBy[N Numeric](projectFn func(T) (N, error)) (N, error) {
 	var sum N
-	if *s.err != nil {
-		return sum, *s.err
-	}
-	for elem := range s.seq {
+	for elem, err := range s.seq {
+		if err != nil {
+			var zero N
+			return zero, err
+		}
 		projected, err := projectFn(elem)
 		if err != nil {
 			var zero N
@@ -507,27 +624,29 @@ func (s *Stream[T]) SumBy[N Numeric](projectFn func(T) (N, error)) (N, error) {
 		}
 		sum += projected
 	}
-	return sum, *s.err
+	return sum, nil
 }
 
 // AverageBy projects each element to a numeric N via projectFn and returns the
 // arithmetic mean as float64. Returns ErrEmpty on empty input.
+//
+// Precision: integer projections larger than 2^53 lose precision when
+// converted to float64 (mantissa is 53 bits). For exact integer averages on
+// large values, use Fold to track sum+count as int64/big.Int and divide
+// yourself.
 func (s *Stream[T]) AverageBy[N Numeric](projectFn func(T) (N, error)) (float64, error) {
-	if *s.err != nil {
-		return 0, *s.err
-	}
 	var sum float64
 	count := 0
-	for elem := range s.seq {
+	for elem, err := range s.seq {
+		if err != nil {
+			return 0, err
+		}
 		projected, err := projectFn(elem)
 		if err != nil {
 			return 0, err
 		}
 		sum += float64(projected)
 		count++
-	}
-	if *s.err != nil {
-		return 0, *s.err
 	}
 	if count == 0 {
 		return 0, ErrEmpty
@@ -539,19 +658,16 @@ func (s *Stream[T]) AverageBy[N Numeric](projectFn func(T) (N, error)) (float64,
 // Encounter order within each group is preserved. Terminal — materializes the
 // full upstream.
 func (s *Stream[T]) GroupBy[K comparable](keyFn func(T) (K, error)) (map[K][]T, error) {
-	if *s.err != nil {
-		return nil, *s.err
-	}
 	groups := make(map[K][]T)
-	for elem := range s.seq {
+	for elem, err := range s.seq {
+		if err != nil {
+			return nil, err
+		}
 		key, err := keyFn(elem)
 		if err != nil {
 			return nil, err
 		}
 		groups[key] = append(groups[key], elem)
-	}
-	if *s.err != nil {
-		return nil, *s.err
 	}
 	return groups, nil
 }
@@ -564,11 +680,11 @@ func (s *Stream[T]) CollectToMap[K comparable, V any](
 	keyFn func(T) (K, error),
 	valueFn func(T) (V, error),
 ) (map[K]V, error) {
-	if *s.err != nil {
-		return nil, *s.err
-	}
 	out := make(map[K]V)
-	for elem := range s.seq {
+	for elem, err := range s.seq {
+		if err != nil {
+			return nil, err
+		}
 		key, err := keyFn(elem)
 		if err != nil {
 			return nil, err
@@ -581,9 +697,6 @@ func (s *Stream[T]) CollectToMap[K comparable, V any](
 			return nil, err
 		}
 		out[key] = value
-	}
-	if *s.err != nil {
-		return nil, *s.err
 	}
 	return out, nil
 }
