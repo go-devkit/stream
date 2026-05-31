@@ -318,7 +318,7 @@ func TestErrorShortCircuitsChain(t *testing.T) {
 }
 
 func TestDistinct(t *testing.T) {
-	out, err := Distinct(Of(1, 2, 2, 3, 1, 4, 3)).ToSlice()
+	out, err := Of(1, 2, 2, 3, 1, 4, 3).Distinct(Self).ToSlice()
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -328,7 +328,7 @@ func TestDistinct(t *testing.T) {
 }
 
 func TestDistinctEmpty(t *testing.T) {
-	out, err := Distinct(FromSlice([]int{})).ToSlice()
+	out, err := FromSlice([]int{}).Distinct(Self).ToSlice()
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -339,12 +339,14 @@ func TestDistinctEmpty(t *testing.T) {
 
 func TestDistinctLazy(t *testing.T) {
 	calls := 0
-	out, err := Distinct(
-		Range(0, 1_000_000).Map(func(v int) (int, error) {
+	out, err := Range(0, 1_000_000).
+		Map(func(elem int) (int, error) {
 			calls++
-			return v % 3, nil
-		}),
-	).Limit(3).ToSlice()
+			return elem % 3, nil
+		}).
+		Distinct(Self).
+		Limit(3).
+		ToSlice()
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -357,14 +359,15 @@ func TestDistinctLazy(t *testing.T) {
 }
 
 func TestDistinctErrorPropagates(t *testing.T) {
-	_, err := Distinct(
-		Of(1, 2, 3).Map(func(v int) (int, error) {
-			if v == 2 {
+	_, err := Of(1, 2, 3).
+		Map(func(elem int) (int, error) {
+			if elem == 2 {
 				return 0, errBoom
 			}
-			return v, nil
-		}),
-	).ToSlice()
+			return elem, nil
+		}).
+		Distinct(Self).
+		ToSlice()
 	if !errors.Is(err, errBoom) {
 		t.Fatalf("got %v, want %v", err, errBoom)
 	}
@@ -375,12 +378,12 @@ type user struct {
 	Name string
 }
 
-func TestDistinctBy(t *testing.T) {
+func TestDistinctOnStruct(t *testing.T) {
 	users := []user{
 		{1, "a"}, {2, "b"}, {1, "c"}, {3, "d"}, {2, "e"},
 	}
 	out, err := FromSlice(users).
-		DistinctBy(func(u user) (int, error) { return u.ID, nil }).
+		Distinct(func(u user) (int, error) { return u.ID, nil }).
 		ToSlice()
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
@@ -391,9 +394,9 @@ func TestDistinctBy(t *testing.T) {
 	}
 }
 
-func TestDistinctByKeyErrorPropagates(t *testing.T) {
+func TestDistinctKeyErrorPropagates(t *testing.T) {
 	_, err := Of(1, 2, 3).
-		DistinctBy(func(v int) (int, error) {
+		Distinct(func(v int) (int, error) {
 			if v == 2 {
 				return 0, errBoom
 			}
@@ -405,8 +408,8 @@ func TestDistinctByKeyErrorPropagates(t *testing.T) {
 	}
 }
 
-func TestMin(t *testing.T) {
-	v, err := Min(Of(3, 1, 4, 1, 5, 9, 2, 6))
+func TestMinViaReduce(t *testing.T) {
+	v, err := Of(3, 1, 4, 1, 5, 9, 2, 6).Reduce(Min)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -415,15 +418,15 @@ func TestMin(t *testing.T) {
 	}
 }
 
-func TestMinEmpty(t *testing.T) {
-	_, err := Min(FromSlice([]int{}))
+func TestMinViaReduceEmpty(t *testing.T) {
+	_, err := FromSlice([]int{}).Reduce(Min)
 	if !errors.Is(err, ErrEmpty) {
 		t.Fatalf("got %v, want ErrEmpty", err)
 	}
 }
 
-func TestMax(t *testing.T) {
-	v, err := Max(Of(3, 1, 4, 1, 5, 9, 2, 6))
+func TestMaxViaReduce(t *testing.T) {
+	v, err := Of(3, 1, 4, 1, 5, 9, 2, 6).Reduce(Max)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -432,9 +435,9 @@ func TestMax(t *testing.T) {
 	}
 }
 
-func TestMinByStruct(t *testing.T) {
+func TestMinOfStruct(t *testing.T) {
 	users := []user{{3, "c"}, {1, "a"}, {2, "b"}}
-	v, err := FromSlice(users).MinBy(func(a, b user) int { return a.ID - b.ID })
+	v, err := FromSlice(users).Reduce(MinOf(func(u user) int { return u.ID }))
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -443,9 +446,9 @@ func TestMinByStruct(t *testing.T) {
 	}
 }
 
-func TestMaxByStruct(t *testing.T) {
+func TestMaxOfStruct(t *testing.T) {
 	users := []user{{3, "c"}, {1, "a"}, {2, "b"}}
-	v, err := FromSlice(users).MaxBy(func(a, b user) int { return a.ID - b.ID })
+	v, err := FromSlice(users).Reduce(MaxOf(func(u user) int { return u.ID }))
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -454,8 +457,8 @@ func TestMaxByStruct(t *testing.T) {
 	}
 }
 
-func TestSum(t *testing.T) {
-	v, err := Sum(Of(1, 2, 3, 4))
+func TestSumViaReduce(t *testing.T) {
+	v, err := Of(1, 2, 3, 4).Reduce(Sum)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -464,18 +467,15 @@ func TestSum(t *testing.T) {
 	}
 }
 
-func TestSumEmpty(t *testing.T) {
-	v, err := Sum(FromSlice([]int{}))
-	if err != nil {
-		t.Fatalf("unexpected err: %v", err)
-	}
-	if v != 0 {
-		t.Fatalf("got %d, want 0", v)
+func TestSumViaReduceEmpty(t *testing.T) {
+	_, err := FromSlice([]int{}).Reduce(Sum)
+	if !errors.Is(err, ErrEmpty) {
+		t.Fatalf("got %v, want ErrEmpty", err)
 	}
 }
 
-func TestSumFloat(t *testing.T) {
-	v, err := Sum(Of(1.5, 2.5, 3.0))
+func TestSumViaReduceFloat(t *testing.T) {
+	v, err := Of(1.5, 2.5, 3.0).Reduce(Sum)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -484,9 +484,9 @@ func TestSumFloat(t *testing.T) {
 	}
 }
 
-func TestSumByProjection(t *testing.T) {
+func TestSumOfProjection(t *testing.T) {
 	users := []user{{1, "a"}, {2, "b"}, {3, "c"}}
-	v, err := FromSlice(users).SumBy(func(u user) (int, error) { return u.ID, nil })
+	v, err := FromSlice(users).Fold(0, SumOf(func(u user) int { return u.ID }))
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -495,20 +495,8 @@ func TestSumByProjection(t *testing.T) {
 	}
 }
 
-func TestSumByErrorPropagates(t *testing.T) {
-	_, err := Of(1, 2, 3).SumBy(func(v int) (int, error) {
-		if v == 2 {
-			return 0, errBoom
-		}
-		return v, nil
-	})
-	if !errors.Is(err, errBoom) {
-		t.Fatalf("got %v, want %v", err, errBoom)
-	}
-}
-
-func TestAverage(t *testing.T) {
-	v, err := Average(Of(1, 2, 3, 4))
+func TestAverageViaSelf(t *testing.T) {
+	v, err := Of(1, 2, 3, 4).Average(Self)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -517,16 +505,16 @@ func TestAverage(t *testing.T) {
 	}
 }
 
-func TestAverageEmpty(t *testing.T) {
-	_, err := Average(FromSlice([]int{}))
+func TestAverageViaSelfEmpty(t *testing.T) {
+	_, err := FromSlice([]int{}).Average(Self)
 	if !errors.Is(err, ErrEmpty) {
 		t.Fatalf("got %v, want ErrEmpty", err)
 	}
 }
 
-func TestAverageByProjection(t *testing.T) {
+func TestAverageProjection(t *testing.T) {
 	users := []user{{2, "a"}, {4, "b"}, {6, "c"}}
-	v, err := FromSlice(users).AverageBy(func(u user) (int, error) { return u.ID, nil })
+	v, err := FromSlice(users).Average(func(u user) (int, error) { return u.ID, nil })
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -538,7 +526,7 @@ func TestAverageByProjection(t *testing.T) {
 func TestFromMap(t *testing.T) {
 	src := map[string]int{"a": 1, "b": 2, "c": 3}
 	out, err := FromMap(src).
-		SortedBy(By(func(elem Entry[string, int]) string { return elem.Key })).
+		Sort(By(func(elem Entry[string, int]) string { return elem.Key })).
 		ToSlice()
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
@@ -554,7 +542,7 @@ func TestFromMap(t *testing.T) {
 }
 
 func TestSort(t *testing.T) {
-	out, err := Sort(Of(3, 1, 4, 1, 5, 9, 2, 6)).ToSlice()
+	out, err := Of(3, 1, 4, 1, 5, 9, 2, 6).Sort(Ascending).ToSlice()
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -563,9 +551,9 @@ func TestSort(t *testing.T) {
 	}
 }
 
-func TestSortedByDescending(t *testing.T) {
+func TestSortDescending(t *testing.T) {
 	out, err := Of(3, 1, 4, 1, 5).
-		SortedBy(Descending).
+		Sort(Descending).
 		ToSlice()
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
@@ -575,10 +563,10 @@ func TestSortedByDescending(t *testing.T) {
 	}
 }
 
-func TestSortedByStructField(t *testing.T) {
+func TestSortStructField(t *testing.T) {
 	users := []user{{3, "c"}, {1, "a"}, {2, "b"}}
 	out, err := FromSlice(users).
-		SortedBy(By(func(elem user) int { return elem.ID })).
+		Sort(By(func(elem user) int { return elem.ID })).
 		ToSlice()
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
@@ -589,10 +577,10 @@ func TestSortedByStructField(t *testing.T) {
 	}
 }
 
-func TestSortedByStructFieldDescending(t *testing.T) {
+func TestSortStructFieldDescending(t *testing.T) {
 	users := []user{{3, "c"}, {1, "a"}, {2, "b"}}
 	out, err := FromSlice(users).
-		SortedBy(Reverse(By(func(elem user) int { return elem.ID }))).
+		Sort(Reverse(By(func(elem user) int { return elem.ID }))).
 		ToSlice()
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
@@ -604,7 +592,7 @@ func TestSortedByStructFieldDescending(t *testing.T) {
 }
 
 func TestSortEmpty(t *testing.T) {
-	out, err := Sort(FromSlice([]int{})).ToSlice()
+	out, err := FromSlice([]int{}).Sort(Ascending).ToSlice()
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -615,7 +603,8 @@ func TestSortEmpty(t *testing.T) {
 
 func TestSortDownstreamLazy(t *testing.T) {
 	calls := 0
-	out, err := Sort(Of(3, 1, 4, 1, 5, 9, 2, 6)).
+	out, err := Of(3, 1, 4, 1, 5, 9, 2, 6).
+		Sort(Ascending).
 		Map(func(elem int) (int, error) {
 			calls++
 			return elem * 10, nil
@@ -633,9 +622,9 @@ func TestSortDownstreamLazy(t *testing.T) {
 	}
 }
 
-func TestGroupBy(t *testing.T) {
+func TestGroup(t *testing.T) {
 	groups, err := Of(1, 2, 3, 4, 5, 6).
-		GroupBy(func(elem int) (string, error) {
+		Group(func(elem int) (string, error) {
 			if elem%2 == 0 {
 				return "even", nil
 			}
@@ -652,8 +641,8 @@ func TestGroupBy(t *testing.T) {
 	}
 }
 
-func TestGroupByEmpty(t *testing.T) {
-	groups, err := FromSlice([]int{}).GroupBy(func(elem int) (int, error) { return elem, nil })
+func TestGroupEmpty(t *testing.T) {
+	groups, err := FromSlice([]int{}).Group(func(elem int) (int, error) { return elem, nil })
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -662,8 +651,8 @@ func TestGroupByEmpty(t *testing.T) {
 	}
 }
 
-func TestGroupByKeyFnErrorPropagates(t *testing.T) {
-	_, err := Of(1, 2, 3).GroupBy(func(elem int) (int, error) {
+func TestGroupKeyFnErrorPropagates(t *testing.T) {
+	_, err := Of(1, 2, 3).Group(func(elem int) (int, error) {
 		if elem == 2 {
 			return 0, errBoom
 		}
@@ -1024,6 +1013,56 @@ func TestZipCombinerErrorPropagates(t *testing.T) {
 		}
 		return a + b, nil
 	}).ToSlice()
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("got %v, want %v", err, errBoom)
+	}
+}
+
+func TestPartition(t *testing.T) {
+	matched, unmatched, err := Of(1, 2, 3, 4, 5).
+		Partition(func(elem int) (bool, error) { return elem%2 == 0, nil })
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !slices.Equal(matched, []int{2, 4}) {
+		t.Fatalf("matched: got %v, want [2 4]", matched)
+	}
+	if !slices.Equal(unmatched, []int{1, 3, 5}) {
+		t.Fatalf("unmatched: got %v, want [1 3 5]", unmatched)
+	}
+}
+
+func TestPartitionEmpty(t *testing.T) {
+	matched, unmatched, err := FromSlice([]int{}).
+		Partition(func(elem int) (bool, error) { return true, nil })
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if len(matched) != 0 || len(unmatched) != 0 {
+		t.Fatalf("got matched=%v unmatched=%v, want both empty", matched, unmatched)
+	}
+}
+
+func TestPartitionPredicateErrorPropagates(t *testing.T) {
+	_, _, err := Of(1, 2, 3).Partition(func(elem int) (bool, error) {
+		if elem == 2 {
+			return false, errBoom
+		}
+		return true, nil
+	})
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("got %v, want %v", err, errBoom)
+	}
+}
+
+func TestPartitionUpstreamErrorPropagates(t *testing.T) {
+	failing := Of(1, 2, 3).Map(func(elem int) (int, error) {
+		if elem == 2 {
+			return 0, errBoom
+		}
+		return elem, nil
+	})
+	_, _, err := failing.Partition(func(elem int) (bool, error) { return true, nil })
 	if !errors.Is(err, errBoom) {
 		t.Fatalf("got %v, want %v", err, errBoom)
 	}
