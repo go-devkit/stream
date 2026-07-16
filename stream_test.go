@@ -1068,6 +1068,68 @@ func TestPartitionUpstreamErrorPropagates(t *testing.T) {
 	}
 }
 
+func TestToSeq(t *testing.T) {
+	seq, err := Of(1, 2, 3).Filter(func(elem int) (bool, error) { return elem%2 == 1, nil }).ToSeq()
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	var collected []int
+	for elem := range seq {
+		collected = append(collected, elem)
+	}
+	if !slices.Equal(collected, []int{1, 3}) {
+		t.Fatalf("got %v", collected)
+	}
+}
+
+func TestToSeqErrorPropagates(t *testing.T) {
+	_, err := Of(1, 2, 3).Map(func(elem int) (int, error) {
+		if elem == 2 {
+			return 0, errBoom
+		}
+		return elem, nil
+	}).ToSeq()
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("got %v, want %v", err, errBoom)
+	}
+}
+
+func TestAsSeq2Bridge(t *testing.T) {
+	var collected []int
+	var seenErr error
+	for elem, err := range Of(1, 2, 3).Filter(func(elem int) (bool, error) { return elem%2 == 1, nil }).AsSeq2() {
+		if err != nil {
+			seenErr = err
+			break
+		}
+		collected = append(collected, elem)
+	}
+	if seenErr != nil {
+		t.Fatalf("unexpected err: %v", seenErr)
+	}
+	if !slices.Equal(collected, []int{1, 3}) {
+		t.Fatalf("got %v, want [1 3]", collected)
+	}
+}
+
+func TestAsSeq2BridgeErrorPropagates(t *testing.T) {
+	var seenErr error
+	for _, err := range Of(1, 2, 3).Map(func(elem int) (int, error) {
+		if elem == 2 {
+			return 0, errBoom
+		}
+		return elem, nil
+	}).AsSeq2() {
+		if err != nil {
+			seenErr = err
+			break
+		}
+	}
+	if !errors.Is(seenErr, errBoom) {
+		t.Fatalf("got %v, want %v", seenErr, errBoom)
+	}
+}
+
 func TestChained(t *testing.T) {
 	sum, err := Range(0, 20).
 		Filter(func(v int) (bool, error) { return v%2 == 0, nil }).
