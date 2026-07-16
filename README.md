@@ -6,13 +6,12 @@ state. Streams are re-runnable.
 
 ## Requirements
 
-Go **1.27** (uses generic methods). Until 1.27 ships, build with `gotip`
-(Go master HEAD) — see the in-repo `Taskfile.yml` and `mise.toml` for one-line
-bootstrap.
+Go **1.27** (uses generic methods). `mise.toml` currently pins
+`go = "1.27rc1"`; bump to the final tag once 1.27 ships.
 
 ```
 mise trust
-task setup-gotip     # one-time: clone + build gotip
+mise install
 task test
 ```
 
