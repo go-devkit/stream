@@ -412,6 +412,29 @@ func (s *Stream[T]) Peek(fn func(T)) *Stream[T] {
 	}}
 }
 
+// AsSeq2 exposes the underlying iter.Seq2[T, error] as a cheap view so the
+// stream can feed into stdlib or third-party code that consumes iter.Seq2
+// directly (e.g. custom range-over-func loops). Lazy — no materialization,
+// error channel preserved.
+func (s *Stream[T]) AsSeq2() iter.Seq2[T, error] {
+	return s.seq
+}
+
+// ToSeq materializes the pipeline, surfaces any error upfront, and returns a
+// non-fallible iter.Seq[T] over the buffered result. Terminal — trades
+// laziness for a plain Seq usable by functions that specifically take
+// iter.Seq[T]. For zero-cost interop without materialization, use AsSeq2.
+func (s *Stream[T]) ToSeq() (iter.Seq[T], error) {
+	var buffer []T
+	for elem, err := range s.seq {
+		if err != nil {
+			return nil, err
+		}
+		buffer = append(buffer, elem)
+	}
+	return slices.Values(buffer), nil
+}
+
 // --- Terminals ---
 
 // ToSlice collects every element into a new slice. Empty input returns a nil
