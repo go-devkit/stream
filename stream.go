@@ -263,6 +263,69 @@ func (s *Stream[T]) DropWhile(predicateFn func(T) (bool, error)) *Stream[T] {
 	}}
 }
 
+// Chunk groups elements into fixed-size batches of up to `size` elements.
+// The last chunk may be shorter if the stream length isn't a multiple of
+// `size`. Each yielded slice is freshly allocated; the caller owns it.
+// A non-positive `size` yields nothing.
+//
+// Package-level (not a method) because Go rejects a method returning
+// Stream[[]T] on a Stream[T] receiver as an instantiation cycle.
+func Chunk[T any](s *Stream[T], size int) *Stream[[]T] {
+	return &Stream[[]T]{seq: func(yield func([]T, error) bool) {
+		if size <= 0 {
+			return
+		}
+		var batch []T
+		for elem, err := range s.seq {
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+			batch = append(batch, elem)
+			if len(batch) == size {
+				if !yield(batch, nil) {
+					return
+				}
+				batch = nil
+			}
+		}
+		if len(batch) > 0 {
+			yield(batch, nil)
+		}
+	}}
+}
+
+// Windowed yields sliding windows of exactly `size` elements, stepping by 1.
+// A stream shorter than `size` yields nothing. Each window is freshly
+// allocated; the caller owns it. A non-positive `size` yields nothing.
+//
+// Package-level for the same reason as Chunk.
+func Windowed[T any](s *Stream[T], size int) *Stream[[]T] {
+	return &Stream[[]T]{seq: func(yield func([]T, error) bool) {
+		if size <= 0 {
+			return
+		}
+		window := make([]T, 0, size)
+		for elem, err := range s.seq {
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+			if len(window) < size {
+				window = append(window, elem)
+			} else {
+				copy(window, window[1:])
+				window[size-1] = elem
+			}
+			if len(window) == size {
+				if !yield(slices.Clone(window), nil) {
+					return
+				}
+			}
+		}
+	}}
+}
+
 func (s *Stream[T]) Skip(count int) *Stream[T] {
 	return &Stream[T]{seq: func(yield func(T, error) bool) {
 		skipped := 0
@@ -460,6 +523,21 @@ func (s *Stream[T]) Count() (int, error) {
 		count++
 	}
 	return count, nil
+}
+
+// Last returns the last element and ok=true; ok=false if the stream is
+// empty. Consumes the full pipeline — cannot short-circuit.
+func (s *Stream[T]) Last() (T, bool, error) {
+	var last, zero T
+	hasLast := false
+	for elem, err := range s.seq {
+		if err != nil {
+			return zero, false, err
+		}
+		last = elem
+		hasLast = true
+	}
+	return last, hasLast, nil
 }
 
 // First returns the first element and ok=true; ok=false if the stream is

@@ -56,11 +56,14 @@ func main() {
 **Sources:** `FromSlice`, `FromSeq`, `FromSeq2`, `Of`, `Range`, `FromMap`, `Concat`.
 
 **Transforms (lazy):** `Map`, `Filter`, `FlatMap`, `Limit`, `Skip`, `TakeWhile`,
-`DropWhile`, `Peek`, `Zip`, `Distinct(keyFn)`, `Sort(cmpFn)`.
+`DropWhile`, `Peek`, `Zip`, `Distinct(keyFn)`, `Sort(cmpFn)`, `Chunk(n)`
+(free fn), `Windowed(n)` (free fn).
 
-**Terminals:** `ToSlice`, `Count`, `First`, `Reduce`, `Fold`, `ForEach`,
+**Terminals:** `ToSlice`, `Count`, `First`, `Last`, `Reduce`, `Fold`, `ForEach`,
 `AnyMatch`, `AllMatch`, `NoneMatch`, `Average`, `Group`, `CollectToMap`,
-`Partition`.
+`Partition`, `ToSeq`.
+
+**Interop:** `AsSeq2()` — lazy view of the underlying `iter.Seq2[T, error]`.
 
 **Callback helpers:**
 - `Self` — identity.
