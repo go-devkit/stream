@@ -1130,6 +1130,190 @@ func TestAsSeq2BridgeErrorPropagates(t *testing.T) {
 	}
 }
 
+func TestLast(t *testing.T) {
+	v, ok, err := Of(1, 2, 3).Last()
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !ok || v != 3 {
+		t.Fatalf("got v=%d ok=%v, want 3 true", v, ok)
+	}
+}
+
+func TestLastEmpty(t *testing.T) {
+	_, ok, err := FromSlice([]int{}).Last()
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if ok {
+		t.Fatal("ok should be false for empty stream")
+	}
+}
+
+func TestLastErrorPropagates(t *testing.T) {
+	_, _, err := Of(1, 2, 3).Map(func(elem int) (int, error) {
+		if elem == 2 {
+			return 0, errBoom
+		}
+		return elem, nil
+	}).Last()
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("got %v, want %v", err, errBoom)
+	}
+}
+
+func TestChunk(t *testing.T) {
+	out, err := Chunk(Of(1, 2, 3, 4, 5), 2).ToSlice()
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	want := [][]int{{1, 2}, {3, 4}, {5}}
+	if len(out) != len(want) {
+		t.Fatalf("got %v, want %v", out, want)
+	}
+	for idx := range want {
+		if !slices.Equal(out[idx], want[idx]) {
+			t.Fatalf("chunk %d: got %v, want %v", idx, out[idx], want[idx])
+		}
+	}
+}
+
+func TestChunkExactMultiple(t *testing.T) {
+	out, err := Chunk(Of(1, 2, 3, 4), 2).ToSlice()
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if len(out) != 2 || !slices.Equal(out[0], []int{1, 2}) || !slices.Equal(out[1], []int{3, 4}) {
+		t.Fatalf("got %v", out)
+	}
+}
+
+func TestChunkEmpty(t *testing.T) {
+	out, err := Chunk(FromSlice([]int{}), 3).ToSlice()
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if len(out) != 0 {
+		t.Fatalf("got %v", out)
+	}
+}
+
+func TestChunkNonPositiveSize(t *testing.T) {
+	out, err := Chunk(Of(1, 2, 3), 0).ToSlice()
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if len(out) != 0 {
+		t.Fatalf("got %v, want empty for size=0", out)
+	}
+}
+
+func TestChunkLazy(t *testing.T) {
+	calls := 0
+	out, err := Chunk(
+		Range(0, 1_000_000).Map(func(elem int) (int, error) {
+			calls++
+			return elem, nil
+		}),
+		2,
+	).Limit(2).ToSlice()
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if len(out) != 2 || !slices.Equal(out[0], []int{0, 1}) || !slices.Equal(out[1], []int{2, 3}) {
+		t.Fatalf("got %v", out)
+	}
+	if calls != 4 {
+		t.Fatalf("Map called %d times, want 4 (Chunk laziness broken)", calls)
+	}
+}
+
+func TestChunkErrorPropagates(t *testing.T) {
+	_, err := Chunk(
+		Of(1, 2, 3).Map(func(elem int) (int, error) {
+			if elem == 2 {
+				return 0, errBoom
+			}
+			return elem, nil
+		}),
+		2,
+	).ToSlice()
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("got %v, want %v", err, errBoom)
+	}
+}
+
+func TestWindowed(t *testing.T) {
+	out, err := Windowed(Of(1, 2, 3, 4, 5), 3).ToSlice()
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	want := [][]int{{1, 2, 3}, {2, 3, 4}, {3, 4, 5}}
+	if len(out) != len(want) {
+		t.Fatalf("got %v, want %v", out, want)
+	}
+	for idx := range want {
+		if !slices.Equal(out[idx], want[idx]) {
+			t.Fatalf("window %d: got %v, want %v", idx, out[idx], want[idx])
+		}
+	}
+}
+
+func TestWindowedShorterThanSize(t *testing.T) {
+	out, err := Windowed(Of(1, 2), 3).ToSlice()
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if len(out) != 0 {
+		t.Fatalf("got %v, want empty", out)
+	}
+}
+
+func TestWindowedExactSize(t *testing.T) {
+	out, err := Windowed(Of(1, 2, 3), 3).ToSlice()
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if len(out) != 1 || !slices.Equal(out[0], []int{1, 2, 3}) {
+		t.Fatalf("got %v", out)
+	}
+}
+
+func TestWindowedLazy(t *testing.T) {
+	calls := 0
+	out, err := Windowed(
+		Range(0, 1_000_000).Map(func(elem int) (int, error) {
+			calls++
+			return elem, nil
+		}),
+		3,
+	).Limit(2).ToSlice()
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if len(out) != 2 || !slices.Equal(out[0], []int{0, 1, 2}) || !slices.Equal(out[1], []int{1, 2, 3}) {
+		t.Fatalf("got %v", out)
+	}
+	if calls != 4 {
+		t.Fatalf("Map called %d times, want 4 (Windowed laziness broken)", calls)
+	}
+}
+
+func TestWindowedErrorPropagates(t *testing.T) {
+	_, err := Windowed(
+		Of(1, 2, 3, 4).Map(func(elem int) (int, error) {
+			if elem == 3 {
+				return 0, errBoom
+			}
+			return elem, nil
+		}),
+		2,
+	).ToSlice()
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("got %v, want %v", err, errBoom)
+	}
+}
+
 func TestChained(t *testing.T) {
 	sum, err := Range(0, 20).
 		Filter(func(v int) (bool, error) { return v%2 == 0, nil }).
