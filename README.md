@@ -6,8 +6,7 @@ state. Streams are re-runnable.
 
 ## Requirements
 
-Go **1.27** (uses generic methods). `mise.toml` currently pins
-`go = "1.27rc1"`; bump to the final tag once 1.27 ships.
+Go **1.27+** (uses generic methods).
 
 ```
 mise trust
@@ -115,4 +114,4 @@ for the right job, not a default.
 
 ## Status
 
-Pre-1.0. Requires unreleased Go 1.27. API may shift before tagging.
+Pre-1.0. Requires Go 1.27+. API may shift before tagging.
